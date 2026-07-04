@@ -1,5 +1,5 @@
 import array, time, math
-import machine, rp2, uctypes, sys
+import machine, rp2, uctypes, sys, gc
 
 def max_factor(value):
     return value & -value
@@ -59,24 +59,6 @@ def pio_assemble(pclk):
         
     return pio_program
 
-    
-def framerate_params(target_fps, frame_size):
-    sys_clock = machine.freq() * 256
-    fps = 1000
-    pdiv = 128
-    sdiv = 3
-
-    for p in range(2, 9):
-        d = round(sys_clock / (target_fps * frame_size * p))
-
-        f = (sys_clock // d) / (p * frame_size)
-        
-        if abs(f - target_fps) < abs(fps - target_fps):
-            fps = f
-            pdiv = p
-            sdiv = d
-            
-    return sys_clock // sdiv, pdiv
 
 
 class ScanWheel:
@@ -86,6 +68,7 @@ class ScanWheel:
         leds : int = 16,
         step : int = 0,
         enable : int = 2,
+        reset : int = 3,
         scanlines : int = 20,
         linewidth : int = 1024,
         framerate = 15
@@ -93,6 +76,7 @@ class ScanWheel:
         self.pin_leds = leds
         self.pin_step = step
         self.pin_enable = enable
+        self.pin_reset = reset
 
         self.frame_w = int(linewidth)
         self.frame_h = int(scanlines)
@@ -106,16 +90,19 @@ class ScanWheel:
         self.framebuffer = bytearray_aligned(self.frame_size, chunk_size)
         
         self.sm = self.state_machine()
-        self.dma = self.dma_chain(self.framebuffer, chunk_count, chunk_size, self.sm)
+        self.dma = ScanWheel.dma_chain(self.framebuffer, chunk_count, chunk_size, self.sm)
         
         self.valign = 0
         self.halign = 0
+        
+        self.read_config()
 
 
     def start(self, leds_state=0):
         
         # turn on the driver
         machine.Pin(self.pin_enable, machine.Pin.OUT).value(0)
+        machine.Pin(self.pin_reset, machine.Pin.OUT).value(1)
         time.sleep_us(10000)
         
         # build the preamble list
@@ -127,12 +114,16 @@ class ScanWheel:
         # set a series of decreasing scanline lengths to ramp up the motor
         start_w = self.frame_w * self.frame_rate / 2
 
-        valign = self.valign
-        tsteps = 40 * self.frame_rate
+        valign = round(self.valign * self.frame_h)
+        tsteps = 3 * self.frame_rate * self.frame_rate
         for t in range(tsteps):
             ramp = 1 - math.pow(1 - t / tsteps, 8)
             preamble.append(int(lerp(start_w, self.frame_w, ramp)) // 2 - 2)
-            valign -= 1
+            valign += 1
+            
+        while (valign % self.frame_h) != 0:
+            preamble.append(int(self.frame_w) // 2 - 2)
+            valign += 1
         
         # transition to normal operation
         preamble.append(int(0))
@@ -140,9 +131,9 @@ class ScanWheel:
         # set the actual line length
         preamble.append(int(self.frame_w) // 2 - 2)
         
-        # pad with dummy pixels to set the horizontal and vertical alignment
-        valign = ((valign % self.frame_h) + self.frame_h) % self.frame_h    
-        for _ in range(self.halign + valign * self.frame_w):
+        # pad with dummy pixels to set the horizontal alignment
+        halign = round(self.halign * self.frame_w) % self.frame_w
+        for _ in range(halign):
             preamble.append(int(0))
             
         # now send that to the state machine
@@ -151,6 +142,52 @@ class ScanWheel:
         # and hand over to the dma chain
         self.dma[0].active(1)
         
+    def align(self):
+        machine.Pin(self.pin_enable, machine.Pin.OUT).value(0)
+        time.sleep_us(10000)
+        machine.Pin(self.pin_reset, machine.Pin.OUT).value(0)
+        time.sleep_us(10000)
+        machine.Pin(self.pin_reset, machine.Pin.OUT).value(1)
+        time.sleep_us(10000)
+
+        
+        green = machine.Pin(self.pin_leds + 1, machine.Pin.OUT)
+        green.value(1)
+        time.sleep(4)
+        
+        for _ in range(7):
+            green.value(1 - green.value())
+            time.sleep(0.25)
+
+        green.init(mode=machine.Pin.ALT, alt=machine.Pin.ALT_PIO0)
+
+
+
+    def stop(self):
+        # turn off the driver
+        machine.Pin(self.pin_enable, machine.Pin.OUT).value(1)
+        
+        # and the LEDs
+        for p in range(8):
+            machine.Pin(self.pin_leds + p, machine.Pin.OUT).value(0)
+
+
+    def read_config(self):
+        try:
+            with open('scanwheel.cfg') as f:
+                for line in f:
+                    line = line.split('#',1)[0].strip()
+                    if line and '=' in line:
+                        k,v = line.split('=',1)
+                        k = k.strip()
+                        
+                        if   k == 'halign':
+                            self.halign = float(v)
+                        elif k == 'valign':
+                            self.valign = float(v)
+
+        except:
+            pass
 
 
     def enforce_chunk_count(self):
@@ -176,9 +213,27 @@ class ScanWheel:
         
         return chunk_count
 
+    @staticmethod
+    def framerate_params(target_fps, frame_size):
+        sys_clock = machine.freq() * 256
+        fps = 1000
+        pdiv = 128
+        sdiv = 3
+
+        for p in range(2, 9):
+            d = round(sys_clock / (target_fps * frame_size * p))
+
+            f = (sys_clock // d) / (p * frame_size)
+            
+            if abs(f - target_fps) < abs(fps - target_fps):
+                fps = f
+                pdiv = p
+                sdiv = d
+                
+        return sys_clock // sdiv, pdiv
 
     def state_machine(self):
-        smfreq, pclk = framerate_params(self.frame_rate, self.frame_size)
+        smfreq, pclk = ScanWheel.framerate_params(self.frame_rate, self.frame_size)
         print(f'sm freq {(smfreq)}, {pclk} clocks/pixel; {(smfreq) / (self.frame_size * pclk)} fps  (target: {self.frame_rate})')
 
         pio_refresh = pio_assemble(pclk)
@@ -187,8 +242,8 @@ class ScanWheel:
         
         return sm
     
-    
-    def dma_chain(self, frame_buffer, chunk_count, chunk_size, sm):
+    @staticmethod
+    def dma_chain(frame_buffer, chunk_count, chunk_size, sm):
         dma = [rp2.DMA() for _ in range(chunk_count)]
             
         chunk_bits = bit_length(chunk_size)
@@ -203,28 +258,24 @@ class ScanWheel:
             
         return dma
 
-    def stop(self):
-        
-        # turn off the driver
-        machine.Pin(self.pin_enable, machine.Pin.OUT).value(1)
-        
-        # and the LEDs
-        for p in range(8):
-            machine.Pin(self.pin_leds + p, machine.Pin.OUT).value(0)
 
 
 
 if __name__ == "__main__":
-    sw = ScanWheel(linewidth=2048, framerate=20)
+    sw = ScanWheel(linewidth=2048, framerate=15)
     
-    try:    
-        with open('tcf2048.raw', 'rb') as f:
-            f.readinto(sw.framebuffer)
+    try:
+        sw.align()
             
         sw.start(leds_state=0b00000111)
-        
+
+        with open('tcf2048.raw', 'rb') as f:
+            f.readinto(sw.framebuffer)
+
         while True:
             time.sleep(0)
+            
+
         
     finally:
         sw.stop()
