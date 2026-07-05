@@ -10,7 +10,7 @@ if __name__ == "__main__":
         sw.start(leds_state=0b00000111)
 
         while True:
-            mv = memoryview(sw.framebuffer)
+            mv = memoryview(sw.framebuffer_memory)
             with open('multirick.raw', 'rb') as f:
                 while True:
                     read = f.readinto(mv[:sw.frame_size])

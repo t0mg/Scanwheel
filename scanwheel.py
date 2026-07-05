@@ -1,5 +1,6 @@
 import array, time, math
-import machine, rp2, uctypes, sys, gc
+import machine, rp2, uctypes
+import framebuf
 
 def max_factor(value):
     return value & -value
@@ -88,10 +89,11 @@ class ScanWheel:
         self.scratch_array = array.array('I', [0] * scratch_max)
         scratch_addr = uctypes.addressof(self.scratch_array)
         
-        self.framebuffer = uctypes.bytearray_at(scratch_addr + ((chunk_size - (scratch_addr % chunk_size)) % chunk_size), self.frame_size)
+        self.framebuffer_memory = uctypes.bytearray_at(scratch_addr + ((chunk_size - (scratch_addr % chunk_size)) % chunk_size), self.frame_size)
+        self.framebuffer = framebuf.FrameBuffer(self.framebuffer_memory, self.frame_w, self.frame_h, framebuf.GS8)
         
         self.sm = self.state_machine()
-        self.dma = ScanWheel.dma_chain(self.framebuffer, chunk_count, chunk_size, self.sm)
+        self.dma = ScanWheel.dma_chain(self.framebuffer_memory, chunk_count, chunk_size, self.sm)
         
         self.valign = 0
         self.halign = 0
@@ -164,6 +166,8 @@ class ScanWheel:
 
         # and hand over to the dma chain
         self.dma[0].active(1)
+        
+        self.framebuffer.fill(0)
         
     def align(self):
         machine.Pin(self.pin_enable, machine.Pin.OUT).value(0)
@@ -298,7 +302,7 @@ if __name__ == "__main__":
         sw.start(leds_state=0b00000111)
         
         with open('tcf2048.raw', 'rb') as f:
-            f.readinto(sw.framebuffer)
+            f.readinto(sw.framebuffer_memory)
 
         while True:
             time.sleep(0)
