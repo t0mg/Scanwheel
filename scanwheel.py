@@ -10,12 +10,6 @@ def bit_length(value):
 def lerp(a, b, t):
     return a + (b - a) * t
 
-def bytearray_aligned(size, alignment):
-    buffer = bytearray(size + alignment - 1)
-    aligned_addr = (uctypes.addressof(buffer) + alignment) & ~(alignment - 1)
-    return uctypes.bytearray_at(aligned_addr, size)
-
-
 def pio_assemble(pclk):
     assert(pclk >= 2)
     
@@ -88,7 +82,13 @@ class ScanWheel:
         
         self.frame_size = int(self.frame_w * self.frame_h)
 
-        self.framebuffer = bytearray_aligned(self.frame_size, chunk_size)
+        preamble_max = 4096
+        scratch_max = max(preamble_max, (self.frame_size + chunk_size + 4) // 4)
+        
+        self.scratch_array = array.array('I', [0] * scratch_max)
+        scratch_addr = uctypes.addressof(self.scratch_array)
+        
+        self.framebuffer = uctypes.bytearray_at(scratch_addr + ((chunk_size - (scratch_addr % chunk_size)) % chunk_size), self.frame_size)
         
         self.sm = self.state_machine()
         self.dma = ScanWheel.dma_chain(self.framebuffer, chunk_count, chunk_size, self.sm)
@@ -107,10 +107,11 @@ class ScanWheel:
         time.sleep_us(1000)
         
         # build the preamble list
-        preamble = array.array('I')
+        preamble = 0
         
         # set the state of the LEDs during spin up
-        preamble.append(int(leds_state) << 24)
+        self.scratch_array[preamble] = (int(leds_state) << 24)
+        preamble += 1
 
         # set a series of decreasing scanline lengths to ramp up the motor
         start_w = self.frame_w * self.frame_rate / 2
@@ -130,30 +131,36 @@ class ScanWheel:
             if w < self.frame_w:
                 break
             
-            preamble.append(int(w) // 2 - 2)
+            self.scratch_array[preamble] = (int(w) // 2 - 2)
+            preamble += 1
             valign += 1
             
             f += b
 
             
         for _ in range((self.frame_h * 2) - (valign % self.frame_h)):
-            preamble.append(int(self.frame_w) // 2 - 2)
+            self.scratch_array[preamble] = (int(self.frame_w) // 2 - 2)
+            preamble += 1
             valign += 1
         
         # transition to normal operation
-        preamble.append(int(0))
+        self.scratch_array[preamble] = (int(0))
+        preamble += 1
         
         # set the actual line length
-        preamble.append(int(self.frame_w) // 2 - 2)
+        self.scratch_array[preamble] = (int(self.frame_w) // 2 - 2)
+        preamble += 1
         
         # pad with dummy pixels to set the horizontal alignment
         for _ in range(halign):
-            preamble.append(int(0))
+            self.scratch_array[preamble] = (int(0))
+            preamble += 1
             
-        print(len(preamble))
+        if preamble > len(self.scratch_array) // 2:
+            print(f'worryingly large preamble ({preamble * 4} of {len(self.scratch_array) * 4} bytes)')
             
         # now send that to the state machine
-        self.sm.put(preamble)
+        self.sm.put(self.scratch_array[:preamble])
 
         # and hand over to the dma chain
         self.dma[0].active(1)
@@ -198,7 +205,7 @@ class ScanWheel:
                         k = k.strip()
                         
                         if   k == 'halign':
-                            self.halign = int(v)
+                            self.halign = float(v)
                         elif k == 'valign':
                             self.valign = int(v)
 
@@ -279,12 +286,11 @@ class ScanWheel:
             )
             
         return dma
-
-
+    
 
 
 if __name__ == "__main__":
-    sw = ScanWheel(linewidth=2048, framerate=24)
+    sw = ScanWheel(linewidth=2048, framerate=20)
     
     try:
         sw.align()
