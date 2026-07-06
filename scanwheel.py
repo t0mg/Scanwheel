@@ -13,19 +13,30 @@ def lerp(a, b, t):
     return a + (b - a) * t
 
 @micropython.asm_thumb
-def _ior_array(r0, r1, r2): # dst, src, len
-    label(loop)
-    cmp(r2, 0)
-    beq(end)
-    ldrb(r3, [r0, 0])
+def _ior_bits_to_bytes_(r0, r1, r2, r3): # dst, src, len, byte
+    lsr(r2, r2, 3)
+    label(LOOP)
+    
     ldrb(r4, [r1, 0])
-    orr(r3, r4)
-    strb(r3, [r0, 0])
+    mov(r5, 128)
+    label(BITS)
+    
+    tst(r4, r5)
+    beq(NOBIT)
+    
+    ldrb(r6, [r0, 0])
+    orr(r6, r3)
+    strb(r6, [r0, 0])
+    
+    label(NOBIT)
     add(r0, r0, 1)
+    lsr(r5, r5, 1)
+    bne(BITS)
+
     add(r1, r1, 1)
     sub(r2, r2, 1)
-    b(loop)
-    label(end)
+    bgt(LOOP)
+
 
 def pio_assemble(pclk):
     assert(pclk >= 2)
@@ -79,6 +90,7 @@ class ScanWheel:
     RGB_LEDS = 1
     
     WINDOW_OFFSETS = [-2, -1, 0, 1, 2]
+    WINDOW_PLANES = [0x40, 0x20, 0x07, 0x10, 0x08]
     
     WINDOW_0 = 0
     WINDOW_1 = 1
@@ -86,15 +98,7 @@ class ScanWheel:
     WINDOW_3 = 3
     WINDOW_4 = 4
     WINDOW_RGB = WINDOW_2
-    WINDOW_01 = 5
-    WINDOW_34 = 6
     
-    PLANE_0 = 0b01000000
-    PLANE_1 = 0b00100000
-    PLANE_2 = 0b00000111
-    PLANE_3 = 0b00010000
-    PLANE_4 = 0b00001000
-
     def __init__(
         self,
         leds : int = 16,
@@ -124,7 +128,6 @@ class ScanWheel:
             lum_bytes_w = (self.frame_w + 7) // 8
             rgb_bytes_w = (self.frame_w + 1) // 2
             window_bytes = (ScanWheel.LUM_LEDS * lum_bytes_w + ScanWheel.RGB_LEDS * rgb_bytes_w) * self.frame_h
-            window_bytes += self.frame_size
         else:
             window_bytes = 0
 
@@ -249,22 +252,23 @@ class ScanWheel:
         if len(self.windows) == 0:
             return
         
-        count = len(ScanWheel.WINDOW_OFFSETS)
-        for i in range(count):
-            w = (i + ScanWheel.WINDOW_RGB) % count
-            
-            self.window_scratch_buffer.blit(self.windows[w], 0, ScanWheel.WINDOW_OFFSETS[w], -1, self.window_planes[w])
-            if ScanWheel.WINDOW_OFFSETS[w] > 0:
-                self.window_scratch_buffer.blit(self.windows[w], 0, ScanWheel.WINDOW_OFFSETS[w] - self.frame_h, -1, self.window_planes[w])
-            if ScanWheel.WINDOW_OFFSETS[w] < 0:
-                self.window_scratch_buffer.blit(self.windows[w], 0, ScanWheel.WINDOW_OFFSETS[w] + self.frame_h, -1, self.window_planes[w])
-            
-            if i == 0:
-                self.frame_memory[:] = self.window_scratch_memory
-            else:
-                _ior_array(self.frame_memory, self.window_scratch_memory, len(self.frame_memory))
+        self.frame_buffer.blit(self.windows[ScanWheel.WINDOW_RGB], 0, 0)
+
+        dst = uctypes.addressof(self.frame_memory)
+        fs = self.frame_size
+        fw = self.frame_w
+        fh = self.frame_h
         
-        
+        for w in range(len(ScanWheel.WINDOW_OFFSETS)):
+            if w != ScanWheel.WINDOW_RGB:
+                src = uctypes.addressof(self.window_memory[w])
+                off = ((ScanWheel.WINDOW_OFFSETS[w]) % fh) * fw
+                
+                if off < fs:
+                    _ior_bits_to_bytes_(dst + off, src, fs - off, ScanWheel.WINDOW_PLANES[w])
+                if off > 0:
+                    _ior_bits_to_bytes_(dst, src + (fs - off) // 8, off, ScanWheel.WINDOW_PLANES[w])
+                
     
     def _create_framebuffers(self, chunk_size, windows):
         scratch_addr = uctypes.addressof(self.scratch_array)
@@ -276,32 +280,25 @@ class ScanWheel:
             w, h = self.frame_w, self.frame_h
             lum_bytes_w = (w + 7) // 8
             rgb_bytes_w = (w + 1) // 2
-            window_bytes = (ScanWheel.LUM_LEDS * lum_bytes_w + ScanWheel.RGB_LEDS * rgb_bytes_w) * h
             window_addr = uctypes.addressof(self.frame_memory) + self.frame_size
             
             lum_bytes = lum_bytes_w * h
             rgb_bytes = rgb_bytes_w * h
             
-            self.windows = [
-                framebuf.FrameBuffer(uctypes.bytearray_at(window_addr, lum_bytes * 2), w, h, framebuf.MONO_HLSB, w * 2),
-                framebuf.FrameBuffer(uctypes.bytearray_at(window_addr + lum_bytes_w, lum_bytes * 2), w, h, framebuf.MONO_HLSB, w * 2),
-                framebuf.FrameBuffer(uctypes.bytearray_at(window_addr + lum_bytes * 4, rgb_bytes), w, h, framebuf.GS4_HMSB),
-                framebuf.FrameBuffer(uctypes.bytearray_at(window_addr + lum_bytes * 2, lum_bytes * 2), w, h, framebuf.MONO_HLSB, w * 2),
-                framebuf.FrameBuffer(uctypes.bytearray_at(window_addr + lum_bytes * 2 + lum_bytes_w, lum_bytes * 2), w, h, framebuf.MONO_HLSB, w * 2),
-
-                framebuf.FrameBuffer(uctypes.bytearray_at(window_addr, lum_bytes * 2), w * 2, h, framebuf.MONO_HLSB),
-                framebuf.FrameBuffer(uctypes.bytearray_at(window_addr + lum_bytes * 2, lum_bytes * 2), w * 2, h, framebuf.MONO_HLSB),
+            self.window_memory = [
+                uctypes.bytearray_at(window_addr + lum_bytes * 0, lum_bytes),
+                uctypes.bytearray_at(window_addr + lum_bytes * 1, lum_bytes),
+                uctypes.bytearray_at(window_addr + lum_bytes * 4, rgb_bytes),
+                uctypes.bytearray_at(window_addr + lum_bytes * 2, lum_bytes),
+                uctypes.bytearray_at(window_addr + lum_bytes * 3, lum_bytes)
             ]
             
-            self.window_scratch_memory = uctypes.bytearray_at(window_addr + window_bytes, self.frame_size)
-            self.window_scratch_buffer = framebuf.FrameBuffer(self.window_scratch_memory, w, h, framebuf.GS8)
-            
-            self.window_planes = [
-                framebuf.FrameBuffer(bytearray([0, 0b01000000]), 2, 1, framebuf.GS8),
-                framebuf.FrameBuffer(bytearray([0, 0b00100000]), 2, 1, framebuf.GS8),
-                framebuf.FrameBuffer(bytearray([0, 0b00000111]), 2, 1, framebuf.GS8),
-                framebuf.FrameBuffer(bytearray([0, 0b00010000]), 2, 1, framebuf.GS8),
-                framebuf.FrameBuffer(bytearray([0, 0b00001000]), 2, 1, framebuf.GS8),
+            self.windows = [
+                framebuf.FrameBuffer(self.window_memory[0], w, h, framebuf.MONO_HLSB),
+                framebuf.FrameBuffer(self.window_memory[1], w, h, framebuf.MONO_HLSB),
+                framebuf.FrameBuffer(self.window_memory[2], w, h, framebuf.GS4_HMSB),
+                framebuf.FrameBuffer(self.window_memory[3], w, h, framebuf.MONO_HLSB),
+                framebuf.FrameBuffer(self.window_memory[4], w, h, framebuf.MONO_HLSB),
             ]
             
         else:
