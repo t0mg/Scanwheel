@@ -1,9 +1,10 @@
 import time, random
 from scanwheel import ScanWheel
 import framebuf
+import micropython
             
 if __name__ == "__main__":
-    sw = ScanWheel(linewidth=512, framerate=20)
+    sw = ScanWheel(linewidth=512, framerate=20, windows=True)
     
     try:    
         
@@ -11,11 +12,6 @@ if __name__ == "__main__":
         NUM_H = 20
         GLYPH_BYTES = NUM_W // 8 * NUM_H
         
-        SCREEN_0 = 0b01000000
-        SCREEN_1 = 0b00100000
-        SCREEN_2 = 0b00000111
-        SCREEN_3 = 0b00010000
-        SCREEN_4 = 0b00001000
         
         numbers_memory = bytearray(GLYPH_BYTES * 10)
         with open('numbers.raw', 'rb') as f:
@@ -29,10 +25,14 @@ if __name__ == "__main__":
         
         n = 0
         while True:
-            sw.framebuffer.blit(numbers[n], 128, 0)
+            for w in range(5):
+                window = sw.windows[ScanWheel.WINDOW_0 + w]
+                window.fill(0)
+                window.blit(numbers[(n+w)%10], 128, 0)
+                window.rect(0, 0, sw.frame_w, sw.frame_h, 1)
             
-            sw.framebuffer.rect(0, 0, sw.frame_w, sw.frame_h, SCREEN_0|SCREEN_1|SCREEN_2|SCREEN_3|SCREEN_4)            
-            
+            sw.windows_present()
+                        
             n = (n + 1) % 10
             time.sleep(1)
             

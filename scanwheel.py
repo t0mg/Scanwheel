@@ -1,4 +1,5 @@
 import array, time, math
+import micropython
 import machine, rp2, uctypes
 import framebuf
 
@@ -10,6 +11,21 @@ def bit_length(value):
 
 def lerp(a, b, t):
     return a + (b - a) * t
+
+@micropython.asm_thumb
+def _ior_array(r0, r1, r2): # dst, src, len
+    label(loop)
+    cmp(r2, 0)
+    beq(end)
+    ldrb(r3, [r0, 0])
+    ldrb(r4, [r1, 0])
+    orr(r3, r4)
+    strb(r3, [r0, 0])
+    add(r0, r0, 1)
+    add(r1, r1, 1)
+    sub(r2, r2, 1)
+    b(loop)
+    label(end)
 
 def pio_assemble(pclk):
     assert(pclk >= 2)
@@ -58,6 +74,26 @@ def pio_assemble(pclk):
 
 
 class ScanWheel:
+    
+    LUM_LEDS = 4
+    RGB_LEDS = 1
+    
+    WINDOW_OFFSETS = [-2, -1, 0, 1, 2]
+    
+    WINDOW_0 = 0
+    WINDOW_1 = 1
+    WINDOW_2 = 2
+    WINDOW_3 = 3
+    WINDOW_4 = 4
+    WINDOW_RGB = WINDOW_2
+    WINDOW_01 = 5
+    WINDOW_34 = 6
+    
+    PLANE_0 = 0b01000000
+    PLANE_1 = 0b00100000
+    PLANE_2 = 0b00000111
+    PLANE_3 = 0b00010000
+    PLANE_4 = 0b00001000
 
     def __init__(
         self,
@@ -67,14 +103,15 @@ class ScanWheel:
         reset : int = 3,
         scanlines : int = 20,
         linewidth : int = 1024,
-        framerate = 15
+        framerate = 15,
+        windows = False
     ):
         self.pin_leds = leds
         self.pin_step = step
         self.pin_enable = enable
         self.pin_reset = reset
 
-        chunk_count, linewidth = ScanWheel.calculate_chunk_count(linewidth, scanlines)
+        chunk_count, linewidth = ScanWheel._calculate_chunk_count(linewidth, scanlines)
         chunk_size = (linewidth * scanlines) // chunk_count
         
         self.frame_w = int(linewidth)
@@ -83,22 +120,32 @@ class ScanWheel:
         
         self.frame_size = int(self.frame_w * self.frame_h)
 
+        if windows:
+            lum_bytes_w = (self.frame_w + 7) // 8
+            rgb_bytes_w = (self.frame_w + 1) // 2
+            window_bytes = (ScanWheel.LUM_LEDS * lum_bytes_w + ScanWheel.RGB_LEDS * rgb_bytes_w) * self.frame_h
+            window_bytes += self.frame_size
+        else:
+            window_bytes = 0
+
+        frame_aligned = self.frame_size + chunk_size - 1
         preamble_max = 4096
-        scratch_max = max(preamble_max, (self.frame_size + chunk_size + 4) // 4)
+        scratch_max = max(preamble_max, (frame_aligned + window_bytes + 3) // 4)
         
         self.scratch_array = array.array('I', [0] * scratch_max)
-        scratch_addr = uctypes.addressof(self.scratch_array)
+        print(f'allocated {scratch_max * 4} bytes for buffers')
         
-        self.framebuffer_memory = uctypes.bytearray_at(scratch_addr + ((chunk_size - (scratch_addr % chunk_size)) % chunk_size), self.frame_size)
-        self.framebuffer = framebuf.FrameBuffer(self.framebuffer_memory, self.frame_w, self.frame_h, framebuf.GS8)
+        self._create_framebuffers(chunk_size, windows)
         
-        self.sm = self.state_machine()
-        self.dma = ScanWheel.dma_chain(self.framebuffer_memory, chunk_count, chunk_size, self.sm)
+        self.sm = self._state_machine()
+        self.dma = ScanWheel._dma_chain(self.frame_memory, chunk_count, chunk_size, self.sm)
         
         self.valign = 0
         self.halign = 0
         
-        self.read_config()
+        self._read_config()
+        
+        
 
 
     def start(self, leds_state=0):
@@ -112,7 +159,7 @@ class ScanWheel:
         preamble = 0
         
         # set the state of the LEDs during spin up
-        self.scratch_array[preamble] = (int(leds_state) << 24)
+        self.scratch_array[preamble] = int(leds_state) << 24
         preamble += 1
 
         # set a series of decreasing scanline lengths to ramp up the motor
@@ -133,29 +180,29 @@ class ScanWheel:
             if w < self.frame_w:
                 break
             
-            self.scratch_array[preamble] = (int(w) // 2 - 2)
+            self.scratch_array[preamble] = int(w) // 2 - 2
             preamble += 1
             valign += 1
             
             f += b
 
-            
+        # stabilise at the target scanline length, and pad to vertical alignment
         for _ in range((self.frame_h * 2) - (valign % self.frame_h)):
-            self.scratch_array[preamble] = (int(self.frame_w) // 2 - 2)
+            self.scratch_array[preamble] = int(self.frame_w // 2 - 2)
             preamble += 1
             valign += 1
         
         # transition to normal operation
-        self.scratch_array[preamble] = (int(0))
+        self.scratch_array[preamble] = int(0)
         preamble += 1
         
         # set the actual line length
-        self.scratch_array[preamble] = (int(self.frame_w) // 2 - 2)
+        self.scratch_array[preamble] = int(self.frame_w // 2 - 2)
         preamble += 1
         
         # pad with dummy pixels to set the horizontal alignment
         for _ in range(halign):
-            self.scratch_array[preamble] = (int(0))
+            self.scratch_array[preamble] = int(0)
             preamble += 1
             
         if preamble > len(self.scratch_array) // 2:
@@ -167,7 +214,7 @@ class ScanWheel:
         # and hand over to the dma chain
         self.dma[0].active(1)
         
-        self.framebuffer.fill(0)
+        self.frame_buffer.fill(0)
         
     def align(self):
         machine.Pin(self.pin_enable, machine.Pin.OUT).value(0)
@@ -197,9 +244,73 @@ class ScanWheel:
         # and the LEDs
         for p in range(8):
             machine.Pin(self.pin_leds + p, machine.Pin.OUT).value(0)
+            
+    def windows_present(self):
+        if len(self.windows) == 0:
+            return
+        
+        count = len(ScanWheel.WINDOW_OFFSETS)
+        for i in range(count):
+            w = (i + ScanWheel.WINDOW_RGB) % count
+            
+            self.window_scratch_buffer.blit(self.windows[w], 0, ScanWheel.WINDOW_OFFSETS[w], -1, self.window_planes[w])
+            if ScanWheel.WINDOW_OFFSETS[w] > 0:
+                self.window_scratch_buffer.blit(self.windows[w], 0, ScanWheel.WINDOW_OFFSETS[w] - self.frame_h, -1, self.window_planes[w])
+            if ScanWheel.WINDOW_OFFSETS[w] < 0:
+                self.window_scratch_buffer.blit(self.windows[w], 0, ScanWheel.WINDOW_OFFSETS[w] + self.frame_h, -1, self.window_planes[w])
+            
+            if i == 0:
+                self.frame_memory[:] = self.window_scratch_memory
+            else:
+                _ior_array(self.frame_memory, self.window_scratch_memory, len(self.frame_memory))
+        
+        
+    
+    def _create_framebuffers(self, chunk_size, windows):
+        scratch_addr = uctypes.addressof(self.scratch_array)
+        
+        self.frame_memory = uctypes.bytearray_at(scratch_addr + ((chunk_size - (scratch_addr % chunk_size)) % chunk_size), self.frame_size)
+        self.frame_buffer = framebuf.FrameBuffer(self.frame_memory, self.frame_w, self.frame_h, framebuf.GS8)
+        
+        if windows:
+            w, h = self.frame_w, self.frame_h
+            lum_bytes_w = (w + 7) // 8
+            rgb_bytes_w = (w + 1) // 2
+            window_bytes = (ScanWheel.LUM_LEDS * lum_bytes_w + ScanWheel.RGB_LEDS * rgb_bytes_w) * h
+            window_addr = uctypes.addressof(self.frame_memory) + self.frame_size
+            
+            lum_bytes = lum_bytes_w * h
+            rgb_bytes = rgb_bytes_w * h
+            
+            self.windows = [
+                framebuf.FrameBuffer(uctypes.bytearray_at(window_addr, lum_bytes * 2), w, h, framebuf.MONO_HLSB, w * 2),
+                framebuf.FrameBuffer(uctypes.bytearray_at(window_addr + lum_bytes_w, lum_bytes * 2), w, h, framebuf.MONO_HLSB, w * 2),
+                framebuf.FrameBuffer(uctypes.bytearray_at(window_addr + lum_bytes * 4, rgb_bytes), w, h, framebuf.GS4_HMSB),
+                framebuf.FrameBuffer(uctypes.bytearray_at(window_addr + lum_bytes * 2, lum_bytes * 2), w, h, framebuf.MONO_HLSB, w * 2),
+                framebuf.FrameBuffer(uctypes.bytearray_at(window_addr + lum_bytes * 2 + lum_bytes_w, lum_bytes * 2), w, h, framebuf.MONO_HLSB, w * 2),
+
+                framebuf.FrameBuffer(uctypes.bytearray_at(window_addr, lum_bytes * 2), w * 2, h, framebuf.MONO_HLSB),
+                framebuf.FrameBuffer(uctypes.bytearray_at(window_addr + lum_bytes * 2, lum_bytes * 2), w * 2, h, framebuf.MONO_HLSB),
+            ]
+            
+            self.window_scratch_memory = uctypes.bytearray_at(window_addr + window_bytes, self.frame_size)
+            self.window_scratch_buffer = framebuf.FrameBuffer(self.window_scratch_memory, w, h, framebuf.GS8)
+            
+            self.window_planes = [
+                framebuf.FrameBuffer(bytearray([0, 0b01000000]), 2, 1, framebuf.GS8),
+                framebuf.FrameBuffer(bytearray([0, 0b00100000]), 2, 1, framebuf.GS8),
+                framebuf.FrameBuffer(bytearray([0, 0b00000111]), 2, 1, framebuf.GS8),
+                framebuf.FrameBuffer(bytearray([0, 0b00010000]), 2, 1, framebuf.GS8),
+                framebuf.FrameBuffer(bytearray([0, 0b00001000]), 2, 1, framebuf.GS8),
+            ]
+            
+        else:
+            self.windows = []
+            
 
 
-    def read_config(self):
+
+    def _read_config(self):
         try:
             with open('scanwheel.cfg') as f:
                 for line in f:
@@ -217,7 +328,7 @@ class ScanWheel:
             pass
 
     @staticmethod
-    def calculate_chunk_count(frame_w, frame_h):
+    def _calculate_chunk_count(frame_w, frame_h):
         DMA_CHANNEL_COUNT = 12
         
         frame_size = frame_w * frame_h
@@ -246,7 +357,7 @@ class ScanWheel:
         return chunk_count, frame_w
 
     @staticmethod
-    def framerate_params(target_fps, frame_size):
+    def _framerate_params(target_fps, frame_size):
         sys_clock = machine.freq() * 256
         fps = 1000
         pdiv = 128
@@ -264,8 +375,8 @@ class ScanWheel:
                 
         return sys_clock // sdiv, pdiv
 
-    def state_machine(self):
-        smfreq, pclk = ScanWheel.framerate_params(self.frame_rate, self.frame_size)
+    def _state_machine(self):
+        smfreq, pclk = ScanWheel._framerate_params(self.frame_rate, self.frame_size)
         print(f'sm freq {(smfreq)}, {pclk} clocks/pixel; {(smfreq) / (self.frame_size * pclk)} fps  (target: {self.frame_rate})')
 
         pio_refresh = pio_assemble(pclk)
@@ -275,7 +386,7 @@ class ScanWheel:
         return sm
     
     @staticmethod
-    def dma_chain(frame_buffer, chunk_count, chunk_size, sm):
+    def _dma_chain(frame_buffer, chunk_count, chunk_size, sm):
         print(f'creating dma chain with {chunk_count} chunks of {chunk_size} bytes')
         dma = [rp2.DMA() for _ in range(chunk_count)]
             
@@ -302,7 +413,7 @@ if __name__ == "__main__":
         sw.start(leds_state=0b00000111)
         
         with open('tcf2048.raw', 'rb') as f:
-            f.readinto(sw.framebuffer_memory)
+            f.readinto(sw.frame_memory)
 
         while True:
             time.sleep(0)
