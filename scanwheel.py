@@ -86,18 +86,18 @@ def pio_assemble(pclk):
 
 class ScanWheel:
     
-    LUM_LEDS = 4
-    RGB_LEDS = 1
+    LUM_LEDS = const(4)
+    RGB_LEDS = const(1)
     
     WINDOW_OFFSETS = [-2, -1, 0, 1, 2]
     WINDOW_PLANES = [0x40, 0x20, 0x07, 0x10, 0x08]
     
-    WINDOW_0 = 0
-    WINDOW_1 = 1
-    WINDOW_2 = 2
-    WINDOW_3 = 3
-    WINDOW_4 = 4
-    WINDOW_RGB = WINDOW_2
+    WINDOW_0 = const(0)
+    WINDOW_1 = const(1)
+    WINDOW_2 = const(2)
+    WINDOW_3 = const(3)
+    WINDOW_4 = const(4)
+    WINDOW_RGB = const(WINDOW_2)
     
     def __init__(
         self,
@@ -107,8 +107,8 @@ class ScanWheel:
         reset : int = 3,
         scanlines : int = 20,
         linewidth : int = 1024,
-        framerate = 15,
-        windows = False
+        framerate : float = 15,
+        windows : bool = False
     ):
         self.pin_leds = leds
         self.pin_step = step
@@ -143,13 +143,10 @@ class ScanWheel:
         self.sm = self._state_machine()
         self.dma = ScanWheel._dma_chain(self.frame_memory, chunk_count, chunk_size, self.sm)
         
-        self.valign = 0
-        self.halign = 0
-        
-        self._read_config()
-        
-        
-
+        config = ScanWheel.read_config()
+        self.hconst = config['hconst']
+        self.halign = config['halign']
+        self.valign = config['valign']
 
     def start(self, leds_state=0):
         
@@ -158,6 +155,10 @@ class ScanWheel:
         machine.Pin(self.pin_reset, machine.Pin.OUT).value(1)
         time.sleep_us(1000)
         
+        # hand over the LEDs
+        for p in range(8):
+            machine.Pin(self.pin_leds + p, mode=machine.Pin.ALT, alt=machine.Pin.ALT_PIO0)
+
         # build the preamble list
         preamble = 0
         
@@ -168,10 +169,12 @@ class ScanWheel:
         # set a series of decreasing scanline lengths to ramp up the motor
         start_w = self.frame_w * self.frame_rate / 2
 
-        valign = self.valign
-        if self.halign < 0:
-            valign += 1
-        halign = round(self.halign * self.frame_w) % self.frame_w
+        valign = -self.valign
+        
+        halign = round((self.hconst * self.frame_rate + self.halign) * self.frame_w)
+        if halign < 0:
+            valign += (-halign // self.frame_w) + 1
+        halign = halign % self.frame_w
         
         a = -0.4
         b = 0.8
@@ -193,7 +196,6 @@ class ScanWheel:
         for _ in range((self.frame_h * 2) - (valign % self.frame_h)):
             self.scratch_array[preamble] = int(self.frame_w // 2 - 2)
             preamble += 1
-            valign += 1
         
         # transition to normal operation
         self.scratch_array[preamble] = int(0)
@@ -219,6 +221,21 @@ class ScanWheel:
         
         self.frame_buffer.fill(0)
         
+    def stand_by(self):
+        machine.Pin(self.pin_enable, machine.Pin.OUT).value(0)
+        time.sleep_us(1000)
+        machine.Pin(self.pin_reset, machine.Pin.OUT).value(0)
+        time.sleep_us(1000)
+        machine.Pin(self.pin_reset, machine.Pin.OUT).value(1)
+        time.sleep_us(1000)
+
+        for p in range(8):
+            machine.Pin(self.pin_leds + p, machine.Pin.OUT).value(0)
+
+        red = machine.Pin(self.pin_leds + 2, machine.Pin.OUT)
+        red.value(1)
+
+                
     def align(self):
         machine.Pin(self.pin_enable, machine.Pin.OUT).value(0)
         time.sleep_us(1000)
@@ -227,7 +244,9 @@ class ScanWheel:
         machine.Pin(self.pin_reset, machine.Pin.OUT).value(1)
         time.sleep_us(1000)
 
-        
+        for p in range(8):
+            machine.Pin(self.pin_leds + p, machine.Pin.OUT).value(0)
+
         green = machine.Pin(self.pin_leds + 1, machine.Pin.OUT)
         green.value(1)
         time.sleep(4)
@@ -235,9 +254,6 @@ class ScanWheel:
         for _ in range(7):
             green.value(1 - green.value())
             time.sleep(0.25)
-
-        green.init(mode=machine.Pin.ALT, alt=machine.Pin.ALT_PIO0)
-
 
 
     def stop(self):
@@ -306,8 +322,13 @@ class ScanWheel:
             
 
 
-
-    def _read_config(self):
+    @staticmethod
+    def read_config():
+        config = {
+            'hconst': float(0.055),
+            'halign': float(0.0),
+            'valign': int(0),
+        }
         try:
             with open('scanwheel.cfg') as f:
                 for line in f:
@@ -315,18 +336,19 @@ class ScanWheel:
                     if line and '=' in line:
                         k,v = line.split('=',1)
                         k = k.strip()
-                        
-                        if   k == 'halign':
-                            self.halign = float(v)
-                        elif k == 'valign':
-                            self.valign = int(v)
-
+                        v = v.strip()
+                        try:
+                            config[k] = type(config[k])(v)
+                        except:
+                            config[k] = v
         except:
             pass
+        
+        return config
 
     @staticmethod
     def _calculate_chunk_count(frame_w, frame_h):
-        DMA_CHANNEL_COUNT = 12
+        DMA_CHANNEL_COUNT = const(12)
         
         frame_size = frame_w * frame_h
         chunk_count = frame_size // max_factor(frame_size)
@@ -402,18 +424,48 @@ class ScanWheel:
 
 
 if __name__ == "__main__":
+    import sys
+
     sw = ScanWheel(linewidth=2048, framerate=20)
     
     try:
         sw.align()
-            
         sw.start(leds_state=0b00000111)
         
-        with open('tcf2048.raw', 'rb') as f:
-            f.readinto(sw.frame_memory)
+        def test_card(path, halign, valign):
+            
+            with open(path, 'rb') as f:
+                offset = (valign * sw.frame_w + halign) % sw.frame_size
+                f.readinto(memoryview(sw.frame_memory)[offset:])
+                if offset > 0:
+                    f.readinto(memoryview(sw.frame_memory)[:offset])
+            
+        hpixels = 0
+        vlines = 0
+        card = 'tcf2048.raw'
+        test_card(card, hpixels, vlines)
 
         while True:
-            time.sleep(0)
+            ch = sys.stdin.read(1)
+            h, v = hpixels, vlines
+            if ch == 'a':
+                h = hpixels - sw.frame_w // 100
+            if ch == 'A':
+                h = hpixels - sw.frame_w // 10
+            if ch == 'd':
+                h = hpixels + sw.frame_w // 100
+            if ch == 'D':
+                h = hpixels + sw.frame_w // 10
+            if ch == 'w':
+                v = vlines - 1
+            if ch == 's':
+                v = vlines + 1
+                
+            if h != hpixels or v != vlines:
+                hpixels = h
+                vlines = ((v + (sw.frame_h // 2)) % sw.frame_h) - (sw.frame_h // 2)
+                print(f'valign={sw.valign + vlines}; halign={(hpixels / sw.frame_w) + sw.halign:.2f}')
+                test_card(card, hpixels, vlines)
             
 
         

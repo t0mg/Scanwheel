@@ -1,12 +1,55 @@
 import time, random
 from scanwheel import ScanWheel
 import micropython, machine, framebuf
+
+tzoffset = 0
+
+def set_time():
+    try:
+        import network, ntptime
+
+        config = ScanWheel.read_config()
+        
+        wlan = network.WLAN(network.STA_IF)
+        wlan.active(True)
+        wlan.connect(config['ssid'], config['wifipw'])
+
+        connection_timeout = 10
+        while connection_timeout > 0:
+            if wlan.status() >= 3:
+                break
             
-if __name__ == "__main__":
+            connection_timeout -= 1
+            print('connecting...')
+            time.sleep(1)
+
+        if wlan.status() == 3:
+            print('connected')
+            ntptime.settime()
+            
+            global tzoffset
+            tzoffset = round(float(config.get('tzoffset', '0')) * 60 * 60)
+            print("time:", time.localtime(time.time() + tzoffset))
+        
+    finally:
+        try:
+            wlan.disconnect()
+        except:
+            pass
+
+        try:
+            wlan.active(False)
+        except:
+            pass
+
+def clock():
     sw = ScanWheel(linewidth=512, framerate=20, windows=True)
+    
+    sw.stand_by()
+    
+    set_time()
 
     rtc = machine.RTC()
-    rtc.datetime((2026, 7, 6, 0, 11, 23, 0, 0))
     
     try:
         
@@ -22,9 +65,11 @@ if __name__ == "__main__":
         mv = memoryview(numbers_memory)
         numbers = [framebuf.FrameBuffer(mv[(9-i) * GLYPH_BYTES : (10-i) * GLYPH_BYTES], NUM_W, NUM_H, framebuf.MONO_HLSB) for i in range(10)]
         
-        pal_lum = None # framebuf.FrameBuffer(bytearray([0x40]), 2, 1, framebuf.MONO_HLSB)
+        def number(n):
+            return numbers[n % 10]
+        
+        #pal_lum = framebuf.FrameBuffer(bytearray([0x40]), 2, 1, framebuf.MONO_HLSB)
         pal_rgb = framebuf.FrameBuffer(bytearray([0x07]), 2, 1, framebuf.GS4_HMSB)
-        palettes = [pal_lum, pal_lum, pal_rgb, pal_lum, pal_lum]
 
         sw.align()
         sw.start(leds_state=0b00000111)
@@ -32,37 +77,32 @@ if __name__ == "__main__":
         seconds = -1
         
         while True:
-            now = rtc.datetime() # (year, month, day, weekday, hours, minutes, seconds, subseconds)
-            if now[6] == seconds:
+            now = time.localtime(time.time() + tzoffset) # (year, month, day, hours, minutes, seconds, subseconds)
+
+            if now[5] == seconds:
                 continue
 
-            seconds = now[6]
+            seconds = now[5]
+
+            for w in range(5):
+                sw.windows[ScanWheel.WINDOW_0 + w].fill(0)
+
+            sw.windows[ScanWheel.WINDOW_0].blit(number(now[3] // 10), 256, 0)
+            sw.windows[ScanWheel.WINDOW_1].blit(number(now[3]  % 10),  64, 0)
+            sw.windows[ScanWheel.WINDOW_2].blit(number(now[4] // 10), 192, 0, 0, pal_rgb)
+            sw.windows[ScanWheel.WINDOW_3].blit(number(now[4]  % 10),   0, 0)
+
+            sw.windows[ScanWheel.WINDOW_4].blit(number(now[5] // 10),   0, 0)
+            sw.windows[ScanWheel.WINDOW_4].blit(number(now[5]  % 10), 256, 0)
             
             for w in range(5):
-                window = sw.windows[ScanWheel.WINDOW_0 + w]
-                
-                window.fill(0)
-                
-                if w == 0:
-                    n = now[4] // 10
-                elif w == 1:
-                    n = now[4] % 10
-                elif w == 2:
-                    n = now[5] // 10
-                elif w == 3:
-                    n = now[5] % 10
-                else:
-                    n = now[6] % 10
-                    
-                if n < 10:
-                    window.blit(numbers[n], 128, 0, 0, palettes[w])
-                    
-                window.rect(0, 0, sw.frame_w, sw.frame_h, 7)
+                sw.windows[ScanWheel.WINDOW_0 + w].rect(0, 0, sw.frame_w, sw.frame_h, 7)
             
             sw.windows_present()
             
     finally:
         sw.stop()
         
+if __name__ == "__main__":
+    clock()
         
-
