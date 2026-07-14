@@ -147,6 +147,63 @@ class ScanWheel:
         self.hconst = config['hconst']
         self.halign = config['halign']
         self.valign = config['valign']
+        
+    def _generate_preamble(self, leds_state, ramp_a, ramp_b):
+        try:
+            preamble = 0
+            
+            # set the state of the LEDs during spin up
+            self.scratch_array[preamble] = int(leds_state) << 24
+            preamble += 1
+
+            valign = -self.valign
+            
+            halign = round((self.hconst * self.frame_rate + self.halign) * self.frame_w)
+            if halign < 0:
+                valign += (-halign // self.frame_w) + 1
+            halign = halign % self.frame_w
+
+            f = 1
+            fw = self.frame_rate * self.frame_w
+            while True:
+                freq =  ramp_b * pow(f, ramp_a)
+                w = fw * freq
+                if w < self.frame_w:
+                    break
+                
+                self.scratch_array[preamble] = int(w) // 2 - 2
+                preamble += 1
+                valign += 1
+                
+                #if (preamble % 10) == 0:
+                #    print(f'{freq * ramp_b}')
+                
+                f += 1
+
+            # stabilise at the target scanline length, and pad to vertical alignment
+            for _ in range((self.frame_h * 2) - (valign % self.frame_h)):
+                self.scratch_array[preamble] = int(self.frame_w // 2 - 2)
+                preamble += 1
+            
+            # transition to normal operation
+            self.scratch_array[preamble] = int(0)
+            preamble += 1
+            
+            # set the actual line length
+            self.scratch_array[preamble] = int(self.frame_w // 2 - 2)
+            preamble += 1
+            
+            # pad with dummy pixels to set the horizontal alignment
+            for _ in range(halign):
+                self.scratch_array[preamble] = int(0)
+                preamble += 1
+        
+        except IndexError:
+            return -1
+        
+        return preamble
+        
+
 
     def start(self, leds_state=0):
         
@@ -160,58 +217,21 @@ class ScanWheel:
             machine.Pin(self.pin_leds + p, mode=machine.Pin.ALT, alt=machine.Pin.ALT_PIO0)
 
         # build the preamble list
-        preamble = 0
-        
-        # set the state of the LEDs during spin up
-        self.scratch_array[preamble] = int(leds_state) << 24
-        preamble += 1
-
-        # set a series of decreasing scanline lengths to ramp up the motor
-        start_w = self.frame_w * self.frame_rate / 2
-
-        valign = -self.valign
-        
-        halign = round((self.hconst * self.frame_rate + self.halign) * self.frame_w)
-        if halign < 0:
-            valign += (-halign // self.frame_w) + 1
-        halign = halign % self.frame_w
-        
-        a = -0.4
-        b = 0.8
-        f = 1
-        fw = self.frame_rate * self.frame_w * b
-        while True:
-            freq = pow(f, a)
-            w = fw * freq
-            if w < self.frame_w:
-                break
+        ramp_a = -0.25
+        ramp_b = 0.3
+        preamble = self._generate_preamble(leds_state, ramp_a, ramp_b)
+    
+        if preamble <= 0:
+            print('preamble overruns scratch buffer')
+            for _ in range(8):
+                ramp_b *= 0.9
+                preamble = self._generate_preamble(leds_state, ramp_a, ramp_b)
+                if preamble > 0:
+                    break
+            if preamble <=0:
+                sys.exit()
             
-            self.scratch_array[preamble] = int(w) // 2 - 2
-            preamble += 1
-            valign += 1
             
-            f += b
-
-        # stabilise at the target scanline length, and pad to vertical alignment
-        for _ in range((self.frame_h * 2) - (valign % self.frame_h)):
-            self.scratch_array[preamble] = int(self.frame_w // 2 - 2)
-            preamble += 1
-        
-        # transition to normal operation
-        self.scratch_array[preamble] = int(0)
-        preamble += 1
-        
-        # set the actual line length
-        self.scratch_array[preamble] = int(self.frame_w // 2 - 2)
-        preamble += 1
-        
-        # pad with dummy pixels to set the horizontal alignment
-        for _ in range(halign):
-            self.scratch_array[preamble] = int(0)
-            preamble += 1
-            
-        if preamble > len(self.scratch_array) // 2:
-            print(f'worryingly large preamble ({preamble * 4} of {len(self.scratch_array) * 4} bytes)')
             
         # now send that to the state machine
         self.sm.put(self.scratch_array[:preamble])
@@ -257,10 +277,23 @@ class ScanWheel:
 
 
     def stop(self):
-        # turn off the driver
+        # turn off the stepper driver
         machine.Pin(self.pin_enable, machine.Pin.OUT).value(1)
         
-        # and the LEDs
+        # stop the dma
+        try:
+            for dma in self.dma:
+                dma.config(read=0, write=0, count=0, ctrl=dma.pack_ctrl(enable=False), trigger=False)
+        except:
+            pass
+        
+        # stop the pio
+        try:
+            self.sm.active(0)
+        except:
+            pass
+
+        # turn off the LEDs
         for p in range(8):
             machine.Pin(self.pin_leds + p, machine.Pin.OUT).value(0)
             
@@ -345,6 +378,13 @@ class ScanWheel:
             pass
         
         return config
+    
+    @staticmethod
+    def write_config(config):
+        with open('scanwheel.cfg', 'w') as f:
+            for k, v in config.items():
+                f.write(f'{k}={v}\n')
+
 
     @staticmethod
     def _calculate_chunk_count(frame_w, frame_h):
@@ -366,12 +406,9 @@ class ScanWheel:
             frame_w = new_w
             
             frame_size = frame_w * frame_h
-            chunk_count = frame_size // max_factor(frame_size)
+            chunk_count = max(2, frame_size // max_factor(frame_size))
             
             print(f'frame dimensions are unachievable - using {frame_w}x{frame_h} instead')
-        
-        while chunk_count * 2 <= DMA_CHANNEL_COUNT:
-            chunk_count *= 2
         
         return chunk_count, frame_w
 
@@ -426,28 +463,33 @@ class ScanWheel:
 if __name__ == "__main__":
     import sys
 
-    sw = ScanWheel(linewidth=2048, framerate=20)
+    sw = ScanWheel(linewidth=2048, framerate=24*0.999)
     
     try:
         sw.align()
         sw.start(leds_state=0b00000111)
         
         def test_card(path, halign, valign):
-            
-            with open(path, 'rb') as f:
-                offset = (valign * sw.frame_w + halign) % sw.frame_size
-                f.readinto(memoryview(sw.frame_memory)[offset:])
-                if offset > 0:
-                    f.readinto(memoryview(sw.frame_memory)[:offset])
+            try:
+                with open(path, 'rb') as f:
+                    offset = (valign * sw.frame_w + halign) % sw.frame_size
+                    f.readinto(memoryview(sw.frame_memory)[offset:])
+                    if offset > 0:
+                        f.readinto(memoryview(sw.frame_memory)[:offset])
+            except:
+                print(f'{path}')
             
         hpixels = 0
         vlines = 0
-        card = 'tcf2048.raw'
-        test_card(card, hpixels, vlines)
+        test_cards = ['tcb2048.raw', 'tcj2048.raw', 'tcg2048.raw', 'tcf2048.raw']
+        card = 3
+        test_card(test_cards[card], hpixels, vlines)
 
         while True:
             ch = sys.stdin.read(1)
             h, v = hpixels, vlines
+            reload = False
+            
             if ch == 'a':
                 h = hpixels - sw.frame_w // 100
             if ch == 'A':
@@ -460,12 +502,23 @@ if __name__ == "__main__":
                 v = vlines - 1
             if ch == 's':
                 v = vlines + 1
+            if ch == 'o':
+                config = ScanWheel.read_config()
+                config['halign'] = (hpixels / sw.frame_w) + sw.halign
+                config['valign'] = sw.valign + vlines
+                ScanWheel.write_config(config)
+                print('wrote scanwheel.cfg')
+            
+            t = ord(ch) - ord('1')
+            if t >= 0 and t < len(test_cards):
+                card = t
+                reload = True
                 
-            if h != hpixels or v != vlines:
+            if reload or h != hpixels or v != vlines:
                 hpixels = h
                 vlines = ((v + (sw.frame_h // 2)) % sw.frame_h) - (sw.frame_h // 2)
                 print(f'valign={sw.valign + vlines}; halign={(hpixels / sw.frame_w) + sw.halign:.2f}')
-                test_card(card, hpixels, vlines)
+                test_card(test_cards[card], hpixels, vlines)
             
 
         
