@@ -91,18 +91,18 @@ def clock():
             seconds = now[5]
 
             for w in range(5):
-                fm.windows[Framing.WINDOW_0 + w].fill(0)
+                fm.windows[ w].fill(0)
 
-            fm.windows[Framing.WINDOW_0].blit(number(now[3] // 10), 256, 0)
-            fm.windows[Framing.WINDOW_1].blit(number(now[3]  % 10),  64, 0)
-            fm.windows[Framing.WINDOW_2].blit(number(now[4] // 10), 192, 0, 0, pal_rgb)
-            fm.windows[Framing.WINDOW_3].blit(number(now[4]  % 10),   0, 0)
+            fm.windows[0].blit(number(now[3] // 10), 256, 0)
+            fm.windows[1].blit(number(now[3]  % 10),  64, 0)
+            fm.windows[2].blit(number(now[4] // 10), 192, 0, 0, pal_rgb)
+            fm.windows[3].blit(number(now[4]  % 10),   0, 0)
 
-            fm.windows[Framing.WINDOW_4].blit(number(now[5] // 10),   0, 0)
-            fm.windows[Framing.WINDOW_4].blit(number(now[5]  % 10), 256, 0)
+            fm.windows[4].blit(number(now[5] // 10),   0, 0)
+            fm.windows[4].blit(number(now[5]  % 10), 256, 0)
             
             for w in range(5):
-                fm.windows[Framing.WINDOW_0 + w].rect(0, 0, sw.frame_w, sw.frame_h, 7)
+                fm.windows[w].rect(0, 0, sw.frame_w, sw.frame_h, 7)
             
             fm.present()
             

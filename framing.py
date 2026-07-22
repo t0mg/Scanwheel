@@ -31,19 +31,12 @@ def _ior_bits_to_bytes_(r0, r1, r2, r3): # dst, src, len, byte
 
 
 class Framing:
-    
-    LUM_LEDS = const(4)
-    RGB_LEDS = const(1)
+    WINDOW_COUNT = const(5)
     
     WINDOW_OFFSETS = [-2, -1, 0, 1, 2]
     WINDOW_PLANES = [0x40, 0x20, 0x07, 0x10, 0x08]
     
-    WINDOW_0 = const(0)
-    WINDOW_1 = const(1)
-    WINDOW_2 = const(2)
-    WINDOW_3 = const(3)
-    WINDOW_4 = const(4)
-    WINDOW_RGB = const(WINDOW_2)
+    WINDOW_RGB = const(2)
     
     def __init__(self, scanwheel):
         self.scanwheel = scanwheel
@@ -76,26 +69,30 @@ class Framing:
         if len(self.windows) == 0:
             return
         
-        self.scanwheel.frame_buffer.blit(self.windows[Framing.WINDOW_RGB], 0, 0)
 
         dst = uctypes.addressof(self.scanwheel.frame_memory)
         fs = self.scanwheel.frame_size
         fw = self.scanwheel.frame_w
         fh = self.scanwheel.frame_h
         
-        for w in range(len(Framing.WINDOW_OFFSETS)):
-            if w != Framing.WINDOW_RGB:
-                src = uctypes.addressof(self.window_memory[w])
-                off = ((Framing.WINDOW_OFFSETS[w]) % fh) * fw
-                
-                if off < fs:
-                    _ior_bits_to_bytes_(dst + off, src, fs - off, Framing.WINDOW_PLANES[w])
-                if off > 0:
-                    _ior_bits_to_bytes_(dst, src + (fs - off) // 8, off, Framing.WINDOW_PLANES[w])
-                
+        #self.scanwheel.frame_buffer.blit(self.windows[Framing.WINDOW_RGB], 0, 0)
+        rgb_stride = len(self.window_memory[Framing.WINDOW_RGB]) // fh
+        
+        for y in range(fh):
+            self.scanwheel.frame_buffer.blit( (memoryview(self.window_memory[Framing.WINDOW_RGB])[rgb_stride * y:], fw, 1, framebuf.GS4_HMSB), 0, y)
+            
+            for w in range(len(Framing.WINDOW_OFFSETS)):
+                if w != Framing.WINDOW_RGB:
+                    src = uctypes.addressof(self.window_memory[w])
+                    _ior_bits_to_bytes_(
+                        dst + (y * fw),
+                        src + (((y - Framing.WINDOW_OFFSETS[w]) % fh) * fw) // 8,
+                        fw,
+                        Framing.WINDOW_PLANES[w]
+                    )
 
 def main():
-    sw = ScanWheel(linewidth=2048, framerate=15)
+    sw = ScanWheel(linewidth=2048, framerate=20)
     fm = Framing(sw)
     
     try:
@@ -104,7 +101,7 @@ def main():
         
         while True:
             for i in range(5):
-                w = fm.windows[Framing.WINDOW_0 + i]
+                w = fm.windows[i]
                 w.rect(0, 0, sw.frame_w, sw.frame_h, 7)
                 w.ellipse(sw.frame_w // 2, sw.frame_h // 2, sw.frame_w * 3 // 9, sw.frame_h * 3 // 8, 7, True)
             
