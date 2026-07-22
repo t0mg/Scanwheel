@@ -57,10 +57,12 @@ def wifi_connect():
     return wlan
 
 def main():
-    sw = ScanWheel(linewidth=1024, framerate=15)
+    sw = ScanWheel(linewidth=2048, framerate=20)
 
     sw.align()
     sw.start(leds_state=0b00000010)
+    
+    sw.frame_buffer.fill(0b00000100)
     
     wlan = wifi_connect()
     if wlan is None:
@@ -69,6 +71,11 @@ def main():
     network_info = wlan.ifconfig()
     ipaddress = network_info[0]
     print('ip address:', ipaddress)
+    
+    sw.frame_buffer.fill(0b00000001)
+    
+    recv_array = bytearray(sw.frame_size)
+    recv_mview = memoryview(recv_array)
 
     try:
         sock = socket.socket()
@@ -81,23 +88,23 @@ def main():
             connected = True
             print(addr)
             
-            mv = memoryview(sw.frame_memory)
             while connected:
                 f = 0
                 while f < sw.frame_size:
-                    r = client.readinto(mv[f:])
+                    r = client.readinto(recv_mview[f:])
                     if r == 0:
                         print('connection closed')
                         connected = False
                         break
                     f += r
+                sw.frame_memory[:] = recv_mview[:]
                     
             client.close()
             
     finally:
+        sw.stop()
         client.close()
         sock.close()
-        gc.collect()
         
             
 if __name__ == "__main__":

@@ -12,31 +12,6 @@ def bit_length(value):
 def lerp(a, b, t):
     return a + (b - a) * t
 
-@micropython.asm_thumb
-def _ior_bits_to_bytes_(r0, r1, r2, r3): # dst, src, len, byte
-    lsr(r2, r2, 3)
-    label(LOOP)
-    
-    ldrb(r4, [r1, 0])
-    mov(r5, 128)
-    label(BITS)
-    
-    tst(r4, r5)
-    beq(NOBIT)
-    
-    ldrb(r6, [r0, 0])
-    orr(r6, r3)
-    strb(r6, [r0, 0])
-    
-    label(NOBIT)
-    add(r0, r0, 1)
-    lsr(r5, r5, 1)
-    bne(BITS)
-
-    add(r1, r1, 1)
-    sub(r2, r2, 1)
-    bgt(LOOP)
-
 
 def pio_assemble(pclk):
     assert(pclk >= 2)
@@ -89,16 +64,6 @@ class ScanWheel:
     LUM_LEDS = const(4)
     RGB_LEDS = const(1)
     
-    WINDOW_OFFSETS = [-2, -1, 0, 1, 2]
-    WINDOW_PLANES = [0x40, 0x20, 0x07, 0x10, 0x08]
-    
-    WINDOW_0 = const(0)
-    WINDOW_1 = const(1)
-    WINDOW_2 = const(2)
-    WINDOW_3 = const(3)
-    WINDOW_4 = const(4)
-    WINDOW_RGB = const(WINDOW_2)
-    
     def __init__(
         self,
         leds : int = 16,
@@ -107,8 +72,7 @@ class ScanWheel:
         reset : int = 3,
         scanlines : int = 20,
         linewidth : int = 1024,
-        framerate : float = 15,
-        windows : bool = False
+        framerate : float = 15
     ):
         self.pin_leds = leds
         self.pin_step = step
@@ -124,21 +88,14 @@ class ScanWheel:
         
         self.frame_size = int(self.frame_w * self.frame_h)
 
-        if windows:
-            lum_bytes_w = (self.frame_w + 7) // 8
-            rgb_bytes_w = (self.frame_w + 1) // 2
-            window_bytes = (ScanWheel.LUM_LEDS * lum_bytes_w + ScanWheel.RGB_LEDS * rgb_bytes_w) * self.frame_h
-        else:
-            window_bytes = 0
-
         frame_aligned = self.frame_size + chunk_size - 1
         preamble_max = 4096
-        scratch_max = max(preamble_max, (frame_aligned + window_bytes + 3) // 4)
+        scratch_max = max(preamble_max, (frame_aligned + 3) // 4)
         
         self.scratch_array = array.array('I', [0] * scratch_max)
         print(f'allocated {scratch_max * 4} bytes for buffers')
         
-        self._create_framebuffers(chunk_size, windows)
+        self._create_framebuffer(chunk_size)
         
         self.sm = self._state_machine()
         self.dma = ScanWheel._dma_chain(self.frame_memory, chunk_count, chunk_size, self.sm)
@@ -296,64 +253,12 @@ class ScanWheel:
         # turn off the LEDs
         for p in range(8):
             machine.Pin(self.pin_leds + p, machine.Pin.OUT).value(0)
-            
-    def windows_present(self):
-        if len(self.windows) == 0:
-            return
-        
-        self.frame_buffer.blit(self.windows[ScanWheel.WINDOW_RGB], 0, 0)
-
-        dst = uctypes.addressof(self.frame_memory)
-        fs = self.frame_size
-        fw = self.frame_w
-        fh = self.frame_h
-        
-        for w in range(len(ScanWheel.WINDOW_OFFSETS)):
-            if w != ScanWheel.WINDOW_RGB:
-                src = uctypes.addressof(self.window_memory[w])
-                off = ((ScanWheel.WINDOW_OFFSETS[w]) % fh) * fw
-                
-                if off < fs:
-                    _ior_bits_to_bytes_(dst + off, src, fs - off, ScanWheel.WINDOW_PLANES[w])
-                if off > 0:
-                    _ior_bits_to_bytes_(dst, src + (fs - off) // 8, off, ScanWheel.WINDOW_PLANES[w])
-                
     
-    def _create_framebuffers(self, chunk_size, windows):
+    def _create_framebuffer(self, chunk_size):
         scratch_addr = uctypes.addressof(self.scratch_array)
         
         self.frame_memory = uctypes.bytearray_at(scratch_addr + ((chunk_size - (scratch_addr % chunk_size)) % chunk_size), self.frame_size)
         self.frame_buffer = framebuf.FrameBuffer(self.frame_memory, self.frame_w, self.frame_h, framebuf.GS8)
-        
-        if windows:
-            w, h = self.frame_w, self.frame_h
-            lum_bytes_w = (w + 7) // 8
-            rgb_bytes_w = (w + 1) // 2
-            window_addr = uctypes.addressof(self.frame_memory) + self.frame_size
-            
-            lum_bytes = lum_bytes_w * h
-            rgb_bytes = rgb_bytes_w * h
-            
-            self.window_memory = [
-                uctypes.bytearray_at(window_addr + lum_bytes * 0, lum_bytes),
-                uctypes.bytearray_at(window_addr + lum_bytes * 1, lum_bytes),
-                uctypes.bytearray_at(window_addr + lum_bytes * 4, rgb_bytes),
-                uctypes.bytearray_at(window_addr + lum_bytes * 2, lum_bytes),
-                uctypes.bytearray_at(window_addr + lum_bytes * 3, lum_bytes)
-            ]
-            
-            self.windows = [
-                framebuf.FrameBuffer(self.window_memory[0], w, h, framebuf.MONO_HLSB),
-                framebuf.FrameBuffer(self.window_memory[1], w, h, framebuf.MONO_HLSB),
-                framebuf.FrameBuffer(self.window_memory[2], w, h, framebuf.GS4_HMSB),
-                framebuf.FrameBuffer(self.window_memory[3], w, h, framebuf.MONO_HLSB),
-                framebuf.FrameBuffer(self.window_memory[4], w, h, framebuf.MONO_HLSB),
-            ]
-            
-        else:
-            self.windows = []
-            
-
 
     @staticmethod
     def read_config():
@@ -459,11 +364,10 @@ class ScanWheel:
         return dma
     
 
-
-if __name__ == "__main__":
+def main():
     import sys
 
-    sw = ScanWheel(linewidth=2048, framerate=24*0.999)
+    sw = ScanWheel(linewidth=2048, framerate=23.976)
     
     try:
         sw.align()
@@ -524,6 +428,6 @@ if __name__ == "__main__":
         
     finally:
         sw.stop()
-        
-        
 
+if __name__ == "__main__":
+    main()

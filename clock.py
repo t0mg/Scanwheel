@@ -1,5 +1,6 @@
 import time, random
 from scanwheel import ScanWheel
+from framing import Framing
 import micropython, machine, framebuf
 
 tzoffset = 0
@@ -25,7 +26,11 @@ def set_time():
 
         if wlan.status() == 3:
             print('connected')
-            ntptime.settime()
+            for _ in range(10):
+                try:
+                    ntptime.settime()
+                except:
+                    pass
             
             global tzoffset
             tzoffset = round(float(config.get('tzoffset', '0')) * 60 * 60)
@@ -43,7 +48,8 @@ def set_time():
             pass
 
 def clock():
-    sw = ScanWheel(linewidth=512, framerate=20, windows=True)
+    sw = ScanWheel(linewidth=512, framerate=20)
+    fm = Framing(sw)
     
     sw.stand_by()
     
@@ -85,20 +91,20 @@ def clock():
             seconds = now[5]
 
             for w in range(5):
-                sw.windows[ScanWheel.WINDOW_0 + w].fill(0)
+                fm.windows[Framing.WINDOW_0 + w].fill(0)
 
-            sw.windows[ScanWheel.WINDOW_0].blit(number(now[3] // 10), 256, 0)
-            sw.windows[ScanWheel.WINDOW_1].blit(number(now[3]  % 10),  64, 0)
-            sw.windows[ScanWheel.WINDOW_2].blit(number(now[4] // 10), 192, 0, 0, pal_rgb)
-            sw.windows[ScanWheel.WINDOW_3].blit(number(now[4]  % 10),   0, 0)
+            fm.windows[Framing.WINDOW_0].blit(number(now[3] // 10), 256, 0)
+            fm.windows[Framing.WINDOW_1].blit(number(now[3]  % 10),  64, 0)
+            fm.windows[Framing.WINDOW_2].blit(number(now[4] // 10), 192, 0, 0, pal_rgb)
+            fm.windows[Framing.WINDOW_3].blit(number(now[4]  % 10),   0, 0)
 
-            sw.windows[ScanWheel.WINDOW_4].blit(number(now[5] // 10),   0, 0)
-            sw.windows[ScanWheel.WINDOW_4].blit(number(now[5]  % 10), 256, 0)
+            fm.windows[Framing.WINDOW_4].blit(number(now[5] // 10),   0, 0)
+            fm.windows[Framing.WINDOW_4].blit(number(now[5]  % 10), 256, 0)
             
             for w in range(5):
-                sw.windows[ScanWheel.WINDOW_0 + w].rect(0, 0, sw.frame_w, sw.frame_h, 7)
+                fm.windows[Framing.WINDOW_0 + w].rect(0, 0, sw.frame_w, sw.frame_h, 7)
             
-            sw.windows_present()
+            fm.present()
             
     finally:
         sw.stop()
