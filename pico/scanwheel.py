@@ -131,16 +131,14 @@ class ScanWheel:
                 self.scratch_array[preamble] = int(w) // 2 - 2
                 preamble += 1
                 valign += 1
-                
-                #if (preamble % 10) == 0:
-                #    print(f'{freq * ramp_b}')
-                
                 f += 1
 
             # stabilise at the target scanline length, and pad to vertical alignment
             for _ in range((self.frame_h * 2) - (valign % self.frame_h)):
                 self.scratch_array[preamble] = int(self.frame_w // 2 - 2)
                 preamble += 1
+                
+            #print(f'preamble {preamble} lines, {preamble // self.frame_h} frames / voff {preamble % self.frame_h}')
             
             # transition to normal operation
             self.scratch_array[preamble] = int(0)
@@ -367,7 +365,7 @@ class ScanWheel:
 def main():
     import sys
 
-    sw = ScanWheel(linewidth=2048, framerate=23.976)
+    sw = ScanWheel(linewidth=2048, framerate=20)
     
     try:
         sw.align()

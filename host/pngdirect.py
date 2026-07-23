@@ -1,7 +1,16 @@
 #!/usr/bin/env python3
-from PIL import Image
-import argparse
 import sys
+import argparse
+from PIL import Image
+import numpy as np
+
+def srgb_to_linear(c):
+    c = c / 255.0
+    return np.where(
+        c <= 0.04045,
+        c / 12.92,
+        ((c + 0.055) / 1.055) ** 2.4
+    )
 
 def pack_image(img):
     w, h = img.size
@@ -40,7 +49,11 @@ def main():
         sys.exit(1)
 
     im = im.convert("RGB")
-    im = im.resize((width, lines), resample=Image.LANCZOS)
+    srgb = np.array(im, dtype=np.float32)
+    linf = srgb_to_linear(srgb)
+    lin8 = (np.clip(linf, 0, 1) * 255).astype(np.uint8)
+    im = Image.fromarray(lin8, mode="RGB")
+    im = im.resize((width, lines), resample=Image.BILINEAR)
 
     packed = pack_image(im)
 
