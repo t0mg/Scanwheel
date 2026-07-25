@@ -11,7 +11,7 @@ so the image quality is a lot better than the 20p line count would imply.
 
 ![A closeup of Scanwheel displaying an image of a flower](./images/scanwheel01.jpg)
 
-There's an accompanying [video](https://example.com/docs) showing the build process, with footage of it in action.
+There's an accompanying [video](https://youtu.be/41b8fw3_wP8) showing the build process, with footage of it in action.
 
 [![Scanwheel build video](./images/scanwheel02.jpg)](https://youtu.be/41b8fw3_wP8)
 
