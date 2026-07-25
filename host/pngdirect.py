@@ -49,10 +49,12 @@ def main():
         sys.exit(1)
 
     im = im.convert("RGB")
+    '''
     srgb = np.array(im, dtype=np.float32)
     linf = srgb_to_linear(srgb)
     lin8 = (np.clip(linf, 0, 1) * 255).astype(np.uint8)
     im = Image.fromarray(lin8, mode="RGB")
+    '''
     im = im.resize((width, lines), resample=Image.BILINEAR)
 
     packed = pack_image(im)

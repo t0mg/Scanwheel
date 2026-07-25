@@ -12,7 +12,6 @@ import numpy as np
 def ffmpeg_frame_memoryviews(input_path, width, height, screens, fps, ffmpeg_path="ffmpeg"):
     frame_size = width * screens * height * 3
     aspect = 9 * screens / 8
-    '''
     cmd = [
         ffmpeg_path,
         "-hide_banner",
@@ -34,6 +33,7 @@ def ffmpeg_frame_memoryviews(input_path, width, height, screens, fps, ffmpeg_pat
         "-pix_fmt", "rgb24",
         "-"
     ]
+    '''
 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if proc.stdout is None:
